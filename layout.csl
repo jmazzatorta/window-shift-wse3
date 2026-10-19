@@ -1,0 +1,90 @@
+// fr_layout.csl - top-level layout of the free-routing (window-shift) testbench.
+//
+// Standalone: no FMM code. Every PE(x,y) originates KZ messages ("lanes") of
+// MSG_WORDS words and delivers them, by software store-and-forward over the
+// fabric, to every PE inside the (2*RADIUS+1)^2 window centred on it:
+//   Phase X: row shift East + West (RADIUS hops each way),
+//   Phase Y: column shift North + South of every block collected in Phase X.
+// Each receiver verifies every arriving message (origin, lane, full payload)
+// and accumulates counters that the host checks against a Python model.
+//
+// Compile-time params (one compile per configuration):
+//   width, height : mesh size
+//   RADIUS        : window radius R (hops per direction)
+//   MSG_WORDS     : payload words per message (>= 2: header origin + lane)
+//   KZ            : lanes (independent messages originated per PE)
+
+param width: u16;
+param height: u16;
+param RADIUS: u16;
+param MSG_WORDS: u16;
+param KZ: u16;
+
+param MEMCPY_H2D_ID: i16;
+param MEMCPY_D2H_ID: i16;
+
+// Parity colors: a PE sends on the color of ITS parity and its neighbour (the
+// opposite parity) receives on that same color, so sender-out == receiver-in
+// for every hop. Clear of the memcpy colors.
+const color_e_even: color = @get_color(3);
+const color_e_odd:  color = @get_color(4);
+const color_w_even: color = @get_color(5);
+const color_w_odd:  color = @get_color(6);
+const color_n_even: color = @get_color(7);
+const color_n_odd:  color = @get_color(8);
+const color_s_even: color = @get_color(9);
+const color_s_odd:  color = @get_color(10);
+
+// Completion task ids (low clear range 8..15).
+const tx_done_e_id: local_task_id = @get_local_task_id(8);
+const rx_done_e_id: local_task_id = @get_local_task_id(9);
+const tx_done_w_id: local_task_id = @get_local_task_id(10);
+const rx_done_w_id: local_task_id = @get_local_task_id(11);
+const tx_done_n_id: local_task_id = @get_local_task_id(12);
+const rx_done_n_id: local_task_id = @get_local_task_id(13);
+const tx_done_s_id: local_task_id = @get_local_task_id(14);
+const rx_done_s_id: local_task_id = @get_local_task_id(15);
+
+const memcpy_mod = @import_module("<memcpy/get_params>", .{
+  .width  = width,
+  .height = height,
+  .MEMCPYH2D_1 = MEMCPY_H2D_ID,
+  .MEMCPYD2H_1 = MEMCPY_D2H_ID,
+});
+
+layout {
+  @set_rectangle(width, height);
+
+  var xId: u16 = 0;
+  while (xId < width) : (xId += 1) {
+    var yId: u16 = 0;
+    while (yId < height) : (yId += 1) {
+      @set_tile_code(xId, yId, "fr_pe.csl", .{
+        .memcpyParams = memcpy_mod.get_params(xId),
+        .color_e_even = color_e_even, .color_e_odd = color_e_odd,
+        .color_w_even = color_w_even, .color_w_odd = color_w_odd,
+        .color_n_even = color_n_even, .color_n_odd = color_n_odd,
+        .color_s_even = color_s_even, .color_s_odd = color_s_odd,
+        .parity_x = xId % 2,
+        .parity_y = yId % 2,
+        .tx_done_e_id = tx_done_e_id, .rx_done_e_id = rx_done_e_id,
+        .tx_done_w_id = tx_done_w_id, .rx_done_w_id = rx_done_w_id,
+        .tx_done_n_id = tx_done_n_id, .rx_done_n_id = rx_done_n_id,
+        .tx_done_s_id = tx_done_s_id, .rx_done_s_id = rx_done_s_id,
+        .pe_x = xId,
+        .pe_y = yId,
+        .width = width,
+        .height = height,
+        .RADIUS = RADIUS,
+        .MSG_WORDS = MSG_WORDS,
+        .KZ = KZ,
+      });
+    }
+  }
+
+  @export_name("done",  [*]u32, true);
+  @export_name("stats", [*]u32, true);
+  @export_name("dbg",   [*]u32, true);
+  @export_name("runtime_init", fn()void);
+  @export_name("run_shift", fn()void);
+}
