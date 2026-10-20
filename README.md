@@ -11,6 +11,13 @@ store-and-forward in the PE core. The fabric configuration is therefore the
 same for any radius, message size or mesh size, and is the same 8 colors
 everywhere.
 
+> **Target environment.** This testbench has been adapted for the **appliance
+> (Wafer-Scale Cluster) version of the Cerebras SDK** as deployed on the
+> **Argonne / ALCF Cerebras CS-3 cluster**. It compiles and runs through the
+> Python appliance client (`cerebras.sdk.client`, `SdkCompiler` / `SdkRuntime`)
+> rather than the containerised (Singularity) `cslc` / `cs_python --cmaddr`
+> flow. See [Environment](#environment) for the exact SDK version and settings.
+
 The project is meant to answer two questions:
 
 1. **Correctness** — does every expected message arrive exactly once, uncorrupted,
@@ -141,10 +148,48 @@ Compile-time limits (assertions):
 
 ---
 
+## Environment
+
+The compile and run scripts target the **appliance (Wafer-Scale Cluster) SDK**,
+the mode used on the **Argonne Leadership Computing Facility (ALCF) Cerebras
+CS-3 cluster**. They were adapted to that deployment and assume:
+
+| item | value |
+|---|---|
+| SDK / ML Software | **Cerebras SDK 2.10** (`cerebras_sdk==2.10.0`, `cerebras_appliance==2.10.0`) |
+| client module | `cerebras.sdk.client` (`SdkCompiler`, `SdkRuntime`) |
+| Python env | an appliance venv, e.g. `cs_appliance_sdk` (Python 3.11); scripts run under `cs_python` |
+| architecture | `--arch=wse3` |
+| fabric dims | `--fabric-dims=762,1172 --fabric-offsets=4,1` (full CS-3 wafer; override with `CSL_FABRIC_DIMS`) |
+| memcpy | `--memcpy --channels 1`, H2D color 0 / D2H color 1 |
+
+Notes specific to the appliance / ALCF setup:
+
+- **No `--cmaddr`.** Unlike the containerised SDK, the appliance client is given
+  the compiled artifact directly (`SdkRuntime(artifact, simulator=False)`); the
+  cluster resolves the CS-3 allocation, so no CM address is passed.
+- **Version check disabled.** The appliance client (seen as 1.1.0) and the
+  cluster server can report an `InconsistentVersion` warning; both scripts pass
+  `disable_version_check=True` to proceed, as is standard on the ALCF system.
+- **Single worker / single CS.** An SDK job on the WSC uses one worker node and
+  one CS system, which is sufficient for this single-wafer testbench.
+- **Simulator fallback.** The only difference between a CS-3 run and a simulator
+  run is the fabric dims; `run.py --simulator` exercises the same artifact
+  through the SDK fabric simulator without a hardware allocation.
+
+> Porting to a different site or SDK line (e.g. the 1.x / ML Software 2.4–2.5
+> appliance releases, or the containerised `cslc` flow) mainly means matching
+> the `cerebras.sdk.client` API surface and the `--fabric-dims` of the local
+> system; the CSL itself is unchanged.
+
+---
+
 ## Running
 
-Requirements: access to a Cerebras appliance and the `cerebras.sdk` Python
-client in an activated environment (e.g. `cs_appliance_sdk`), plus NumPy.
+Requirements: access to the Argonne / ALCF Cerebras CS-3 appliance (or another
+WSC running SDK 2.10) and the `cerebras.sdk` Python client in an activated
+environment (e.g. `cs_appliance_sdk`), plus NumPy. See
+[Environment](#environment) for versions and settings.
 
 ### 1. (Optional) check the logic locally — no hardware needed
 
@@ -209,4 +254,3 @@ routing stopped.
 | `dbg` | `u32[16]` | progress counters for hang diagnosis (see `pe.csl`) |
 | `runtime_init` | fn | arms the command stream; launch it first |
 | `run_shift` | fn | seeds the payload and starts Phase X, then returns. The host polls `done` |
-
