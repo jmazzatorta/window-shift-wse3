@@ -99,7 +99,7 @@ Each PE runs `verify_and_count` on every message it consumes:
 - **Fold into `stats`:** count, Σ key, and Σ (lo² + hi²) of the key, where
   `key = origin*KZ + lane + 1`.
 
-The host recomputes the expected values for every PE (`fr_model.py`) and
+The host recomputes the expected values for every PE (`model.py`) and
 compares.
 
 > All on-PE integer arithmetic is 16-bit: the PE core has no 32-bit integer
@@ -112,12 +112,12 @@ compares.
 
 | file | role |
 |---|---|
-| `fr_layout.csl` | Top-level layout: mesh, colors, task ids, parameters, exports |
-| `fr_pe.csl` | Per-PE program: transport state machine, payload seeding, `verify_and_count` |
-| `fr_compile.py` | Compiles one configuration on the appliance → `compiled/<label>/` |
-| `fr_run.py` | Runs a compiled configuration, polls completion, verifies, prints PASS/FAIL |
-| `fr_model.py` | Host oracle: expected per-PE stats, fabric traffic (no SDK needed) |
-| `fr_sim.py` | Event-level Python simulation of `fr_pe.csl` (no SDK needed) |
+| `layout.csl` | Top-level layout: mesh, colors, task ids, parameters, exports |
+| `pe.csl` | Per-PE program: transport state machine, payload seeding, `verify_and_count` |
+| `compile.py` | Compiles one configuration on the appliance → `compiled/<label>/` |
+| `run.py` | Runs a compiled configuration, polls completion, verifies, prints PASS/FAIL |
+| `model.py` | Host oracle: expected per-PE stats, fabric traffic (no SDK needed) |
+| `sim.py` | Event-level Python simulation of `pe.csl` (no SDK needed) |
 
 ---
 
@@ -149,11 +149,11 @@ client in an activated environment (e.g. `cs_appliance_sdk`), plus NumPy.
 ### 1. (Optional) check the logic locally — no hardware needed
 
 ```bash
-python3 fr_model.py   # expected counts for 16×16, R=3
-python3 fr_sim.py     # event-level simulation, 8 configs × 25 random schedules
+python3 model.py   # expected counts for 16×16, R=3
+python3 sim.py     # event-level simulation, 8 configs × 25 random schedules
 ```
 
-`fr_sim.py` runs the same state machine as `fr_pe.csl` with a rendezvous
+`sim.py` runs the same state machine as `pe.csl` with a rendezvous
 fabric model, the most restrictive one: a send completes only when the
 neighbour has armed its receive. Tasks fire in a random order. It should print
 `ALL OK`.
@@ -161,8 +161,8 @@ neighbour has armed its receive. Tasks fire in a random order. It should print
 ### 2. Compile
 
 ```bash
-python fr_compile.py --label fr1                                  # defaults
-python fr_compile.py --radius 2 --msg 32 --kz 2 --label r2_m32_k2 # any config
+python compile.py --label fr1                                  # defaults
+python compile.py --radius 2 --msg 32 --kz 2 --label r2_m32_k2 # any config
 ```
 
 The output goes to `compiled/<label>/` and holds the artifact, `out/` and
@@ -175,14 +175,14 @@ kill the job.
 ### 3. Run and verify
 
 ```bash
-python fr_run.py --label fr1
-python fr_run.py --label fr1 --timeout 60   # longer polling window
+python run.py --label fr1
+python run.py --label fr1 --timeout 60   # longer polling window
 ```
 
 Expected output for a correct run:
 
 ```
-[fr_run] done = 256/256 ...
+[run] done = 256/256 ...
 --- VERIFY ---
   finished PEs        : 256/256
   count mismatches    : 0
@@ -193,7 +193,7 @@ Expected output for a correct run:
 RESULT: PASS
 ```
 
-If the run does not complete within the timeout, `fr_run.py` prints a progress
+If the run does not complete within the timeout, `run.py` prints a progress
 table for the middle row (`dbg`): receive and send counters per direction, the
 Phase X pass, the current Phase Y block, and done flags. This shows where the
 routing stopped.
@@ -206,26 +206,7 @@ routing stopped.
 |---|---|---|
 | `done` | `u32[1]` | 1 when the PE finished both phases |
 | `stats` | `u32[8]` | consumed, Σkey, Σ(lo²+hi²), header err, payload err, X hop err, Y hop err, finished |
-| `dbg` | `u32[16]` | progress counters for hang diagnosis (see `fr_pe.csl`) |
+| `dbg` | `u32[16]` | progress counters for hang diagnosis (see `pe.csl`) |
 | `runtime_init` | fn | arms the command stream; launch it first |
 | `run_shift` | fn | seeds the payload and starts Phase X, then returns. The host polls `done` |
 
----
-
-## Roadmap
-
-1. ☑ Transport-only correctness on device (16×16, R=3, MSG=16, KZ=1): PASS.
-2. ☐ On-device cycle counter per PE (start → done); min/max/mean latency.
-3. ☐ Radius sweep (one compile per R), table of cycles vs R.
-4. ☐ Message-size sweep, then mesh-size sweep.
-5. ☐ Queue depth / pacing (`NBUF > 1` messages in flight per direction, Phase Y
-   sub-shifts overlapped in a pipeline).
-6. ☐ Throughput figures from `fr_model.traffic()` (message-hops, word-hops)
-   against measured cycles.
-
-## Origin
-
-The transport was first developed as the far-field (M2L) communication layer of
-a 2.5D Fast Multipole Method on WSE-3. This repository isolates it so that
-routing can be tested and measured on its own, independent of any application
-math.
