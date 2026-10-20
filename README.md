@@ -285,38 +285,3 @@ exchange stalled.
 | `runtime_init` | fn | arms the command stream; launch it first |
 | `run_shift` | fn | seeds the payload and starts Phase X, then returns. The host polls `done` |
 
----
-
-## Relation to `<message_passing>`
-
-The Cerebras SDK ships a `<message_passing>` library (WSE-3) that also moves
-data between non-adjacent PEs in software, so the two can look similar. They
-solve different problems with opposite mechanisms:
-
-| | this testbench (window-shift) | SDK `<message_passing>` |
-|---|---|---|
-| pattern | windowed neighborhood exchange (every PE ↔ its `(2R+1)²` window) | arbitrary point-to-point to an explicit `(col,row)` |
-| addressing | implicit in geometry; **no destination header** | explicit header (dest col/row, direction, length) in the first wavelet |
-| who forwards | the **PE core** (store-and-forward, re-emit) | the **fabric router** (header + static filters); intermediate PE cores are not involved |
-| non-recipient | no such concept — every hop is a recipient | router filter drops the pass-through |
-| colors | 8 (ids 3–10), all explicit | 1 (`bank_id+2`); bank 14 or 19 (19 clashes with memcpy) |
-| message length | bounded only by buffers | ≤ 31 wavelets (5-bit length) unless control-bit mode |
-
-In short, `<message_passing>` is a general point-to-point primitive whose
-intermediate PEs pay no core cycles; this testbench is a structured collective
-whose value is the *pattern* (separable window exchange, local termination,
-verified in-order delivery), which would have to be rebuilt on top of
-`<message_passing>` anyway.
-
----
-
-## Roadmap
-
-1. ☑ Transport-only correctness on device (16×16, R=3, MSG=16, KZ=1): PASS.
-2. ☐ On-device cycle counter per PE (start → done); min/max/mean latency.
-3. ☐ Radius sweep (one compile per R), table of cycles vs R.
-4. ☐ Message-size sweep, then mesh-size sweep.
-5. ☐ Queue depth / pacing (`NBUF > 1` messages in flight per direction, Phase Y
-   sub-shifts overlapped in a pipeline).
-6. ☐ Throughput figures from `model.traffic()` (message-hops, word-hops)
-   against measured cycles.
