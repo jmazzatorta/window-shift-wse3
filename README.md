@@ -1,27 +1,41 @@
-# Window-shift free routing on the Cerebras WSE-3
+# Variable-radius neighborhood exchange on the Cerebras WSE-3 (window-shift)
 
-A small, standalone CSL testbench that demonstrates and measures **software
-("free") routing** of messages across the PE mesh of a Cerebras WSE-3, using a
-**window shift** pattern: every PE delivers its message(s) to every PE inside a
-`(2R+1) × (2R+1)` window centred on itself.
+A small, standalone CSL **testbench for a variable-radius neighborhood
+exchange** across the PE mesh of a Cerebras WSE-3. Every PE delivers its
+message(s) to every PE inside a `(2R+1) × (2R+1)` window centred on itself, and
+the testbench checks that this happens **correctly** and measures **how fast**
+it is, as a function of the window radius, the message size and the mesh size.
 
-There are no static multicast routes and no pass-through fabric switches. Every
-hop is a single-hop transfer between neighbouring PEs, and forwarding is
-store-and-forward in the PE core. The fabric configuration is therefore the
-same for any radius, message size or mesh size, and is the same 8 colors
-everywhere.
+The communication pattern — each PE exchanges with all PEs in its local
+`(2R+1)²` neighbourhood — is a **neighborhood collective** (in the sense of
+MPI's `MPI_Neighbor_*`) with a *configurable radius*. It is realised by a
+**window-shift** transport: separable row-then-column shifts, single-hop
+store-and-forward between neighbouring PEs, no static multicast routes and no
+pass-through fabric switches. The fabric configuration is therefore the same for
+any radius, message size or mesh size — the same 8 colors everywhere.
 
-> **Target environment.** This testbench has been adapted for the **appliance
-> (Wafer-Scale Cluster) version of the Cerebras SDK** as deployed on the
-> **Argonne / ALCF Cerebras CS-3 cluster**. It compiles and runs through the
-> Python appliance client (`cerebras.sdk.client`, `SdkCompiler` / `SdkRuntime`)
-> rather than the containerised (Singularity) `cslc` / `cs_python --cmaddr`
-> flow. See [Environment](#environment) for the exact SDK version and settings.
+> **Blocks, not borders.** Unlike a classic stencil halo exchange, which moves
+> only boundary cells, this exchange moves each PE's **whole message block** to
+> every PE in the window. Semantically it is a *windowed all-gather*: after a
+> run, PE `(x,y)` holds the complete message of every PE within radius R, not
+> just an edge. Keep this in mind when reading the traffic figures — they scale
+> with the window area, not with its perimeter.
 
-The project is meant to answer two questions:
+> **Not tied to any application.** The payload is synthetic and the per-message
+> work is a verifier, not physics. The testbench measures the *communication*;
+> any application-specific reduction is out of scope and deliberately absent.
 
-1. **Correctness** — does every expected message arrive exactly once, uncorrupted,
-   in hop order, without deadlock?
+> **Target environment.** Adapted for the **appliance (Wafer-Scale Cluster)
+> version of the Cerebras SDK** as deployed on the **Argonne / ALCF Cerebras
+> CS-3 cluster**. It compiles and runs through the Python appliance client
+> (`cerebras.sdk.client`, `SdkCompiler` / `SdkRuntime`) rather than the
+> containerised (Singularity) `cslc` / `cs_python --cmaddr` flow. See
+> [Environment](#environment).
+
+The project answers two questions:
+
+1. **Correctness** — does every expected message arrive exactly once,
+   uncorrupted, in hop order, without deadlock?
 2. **Performance** — how does completion time scale with the radius, the message
    size, the queue depth and the mesh size?
 
@@ -58,9 +72,12 @@ that is 10000 = 9744 + 256: no hop is wasted.
  2R+1 row-window blocks into rowbuf.  R hops North and R hops South.
 ```
 
-After both phases, PE `(x, y)` has seen the message of every PE
-`(x+dx, y+dy)` with `|dx|, |dy| ≤ R` that lies inside the mesh, including its
-own. Every message makes at most 2R hops.
+The exchange is **separable**: because the window is a box, doing the row shift
+first and the column shift second visits the whole `(2R+1)²` neighbourhood in
+`O(R)` hops per direction instead of enumerating `O(R²)` peers. After both
+phases, PE `(x, y)` has seen the message of every PE `(x+dx, y+dy)` with
+`|dx|, |dy| ≤ R` that lies inside the mesh, including its own. Every message
+makes at most 2R hops.
 
 ### Transport rules (per direction)
 
@@ -72,7 +89,11 @@ own. Every message makes at most 2R hops.
   and sending alternates strictly with draining (`emit → txDone → arm_drain →
   rxDone → emit …`). Sending and draining never happen at the same time.
 - **Hop count in the message.** The last word of each message (`SENT`) carries
-  the hop count. A receiver forwards the message only while `hop < R`.
+  the hop count. A receiver forwards the message only while `hop < R`. This is
+  the only control field on the fabric — there is no destination address: the
+  direction a message came from is implied by which color (hence which task)
+  received it, and the source PE is reconstructed from direction + hop count +
+  the receiver's own position.
 - **Local termination.** Every PE knows at compile time how many arrivals to
   expect from each direction (`n_from_w/e/n/s`, clipped at the mesh edges). It
   finishes a direction when the count is reached, so there is no global barrier.
@@ -87,8 +108,10 @@ own. Every message makes at most 2R hops.
 
 ### Synthetic payload and verification
 
-There is no application math. Each message is `MSG_WORDS` f32 words plus the
-hop sentinel:
+The testbench carries no application work. The per-message consumer exists only
+to **verify** that the transport delivered the right data, and to accumulate
+per-PE checksums the host can compare against a model. Each message is
+`MSG_WORDS` f32 words plus the hop sentinel:
 
 | word | content |
 |---|---|
@@ -97,17 +120,20 @@ hop sentinel:
 | `2 … MSG_WORDS-1` | `fill(origin, lane, i)`, a known integer pattern |
 | `SENT` | hop count (transport only) |
 
-Each PE runs `verify_and_count` on every message it consumes:
+`verify_and_count` runs on every message a PE consumes:
 
-- **Header check:** the origin and lane must match the position the transport
-  says the message came from.
+- **Origin check:** the origin and lane encoded in words 0–1 must match the
+  position the transport says the message came from (direction + hop count).
 - **Payload check:** every body word must equal `fill()` of the received
-  header. This catches corruption even when the header is intact.
+  origin/lane. This catches corruption even when words 0–1 are intact.
 - **Fold into `stats`:** count, Σ key, and Σ (lo² + hi²) of the key, where
-  `key = origin*KZ + lane + 1`.
+  `key = origin*KZ + lane + 1`. The sums are an order-independent checksum of
+  *which* messages arrived.
 
-The host recomputes the expected values for every PE (`model.py`) and
-compares.
+The host recomputes the expected values for every PE (`model.py`) and compares.
+Note this consumer is a **test oracle**, not a stand-in for a computation: it is
+intentionally light so that, once the on-device cycle counter lands, the
+measured cycles reflect the transport and not application math.
 
 > All on-PE integer arithmetic is 16-bit: the PE core has no 32-bit integer
 > multiply (cslc fails with `Cannot select: i32 = mul`). This limits
@@ -120,7 +146,7 @@ compares.
 | file | role |
 |---|---|
 | `layout.csl` | Top-level layout: mesh, colors, task ids, parameters, exports |
-| `pe.csl` | Per-PE program: transport state machine, payload seeding, `verify_and_count` |
+| `pe.csl` | Per-PE program: window-shift transport state machine, payload seeding, `verify_and_count` |
 | `compile.py` | Compiles one configuration on the appliance → `compiled/<label>/` |
 | `run.py` | Runs a compiled configuration, polls completion, verifies, prints PASS/FAIL |
 | `model.py` | Host oracle: expected per-PE stats, fabric traffic (no SDK needed) |
@@ -140,6 +166,10 @@ compile per configuration.
 | `--radius` | `RADIUS` | window radius R (hops per direction) | 3 |
 | `--msg` | `MSG_WORDS` | payload words per message (≥ 2) | 16 |
 | `--kz` | `KZ` | lanes = messages originated per PE | 1 |
+
+The radius `R` is the sweep variable of interest: it ranges from a single-hop
+exchange (`R=1`) up to a full all-to-all when `R ≥ max(width,height)−1`, where
+the window covers the whole mesh.
 
 Compile-time limits (assertions):
 
@@ -206,7 +236,7 @@ neighbour has armed its receive. Tasks fire in a random order. It should print
 ### 2. Compile
 
 ```bash
-python compile.py --label fr1                                  # defaults
+python compile.py --label ne1                                  # defaults
 python compile.py --radius 2 --msg 32 --kz 2 --label r2_m32_k2 # any config
 ```
 
@@ -220,8 +250,8 @@ kill the job.
 ### 3. Run and verify
 
 ```bash
-python run.py --label fr1
-python run.py --label fr1 --timeout 60   # longer polling window
+python run.py --label ne1
+python run.py --label ne1 --timeout 60   # longer polling window
 ```
 
 Expected output for a correct run:
@@ -241,7 +271,7 @@ RESULT: PASS
 If the run does not complete within the timeout, `run.py` prints a progress
 table for the middle row (`dbg`): receive and send counters per direction, the
 Phase X pass, the current Phase Y block, and done flags. This shows where the
-routing stopped.
+exchange stalled.
 
 ---
 
@@ -254,3 +284,4 @@ routing stopped.
 | `dbg` | `u32[16]` | progress counters for hang diagnosis (see `pe.csl`) |
 | `runtime_init` | fn | arms the command stream; launch it first |
 | `run_shift` | fn | seeds the payload and starts Phase X, then returns. The host polls `done` |
+
